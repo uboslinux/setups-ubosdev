@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  ubos-develop:
+    container_name: ubos-develop
+    image: ubos/ubos-develop-${CHANNEL:-yellow}:latest
+    working_dir: /home/ubosdev/project
+    privileged: true
+    volumes:
+      - .:/home/ubosdev/project
+
+  ubos-target:
+    container_name: ubos-target
+    image: ubos/ubos-target-${CHANNEL:-yellow}:latest
+    ports:
+      - 8080:80
+      - 8443:443
+    privileged: true
+
