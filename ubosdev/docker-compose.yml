@@ -11,7 +11,7 @@ services:
 
   ubos-target:
     container_name: ubos-target
-    image: ubos/ubos-${CHANNEL:-yellow}:latest
+    image: ubos/ubos-target-${CHANNEL:-yellow}:latest
     ports:
       - 8080:80
       - 8443:443
