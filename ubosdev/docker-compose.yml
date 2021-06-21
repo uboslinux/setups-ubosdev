@@ -4,7 +4,7 @@ services:
   ubos-develop:
     container_name: ubos-develop
     image: ubos/ubos-develop-${CHANNEL:-yellow}:latest
-    working_dir: /home/ubosdev/project
+    working_dir: /home/ubosdev
     privileged: true
     volumes:
       - .:/home/ubosdev/project
