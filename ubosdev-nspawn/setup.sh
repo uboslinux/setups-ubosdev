@@ -16,9 +16,9 @@ bootContainer() {
     name="$1"
 
     echo "Booting container ${name}..."
-    sudo systemd-nspawn -b -n -M "${name}" -D "${name}" >/dev/null 2>&1 &
+    sudo systemd-nspawn -b -n -M "${name}" -D "${name}" > /dev/null &
     sleep 10 
-    until sudo machinectl shell "${name}" /usr/bin/ubos-admin status --ready >/dev/null 2>&1; do
+    until sudo machinectl shell "${name}" /usr/bin/ubos-admin status --ready > /dev/null; do
         echo "Waiting for container ${name} to be ready..."
         sleep 5
     done
@@ -29,10 +29,10 @@ terminateContainer() {
     name="$1"
 
     echo "Shutting down container ${name}..."
-    sudo machinectl terminate "${name}"
+    sudo machinectl terminate -q "${name}" > /dev/null
 }
 
-echo "Checking pre-conditions..."
+echo "** Checking pre-conditions..."
 
 ## Check we have all required executables
 for e in systemd-nspawn btrfs perl; do
@@ -42,8 +42,11 @@ done
 ## Check the current filesystem is btrfs
 df --output=fstype . | grep btrfs > /dev/null 2>&1 || die "Working directory is not on a btrfs filesystem"
 
-## default release channel is yellow
-[[ -z "${CHANNEL}" ]] && CHANNEL=yellow
+## default release channel is green
+[[ -z "${CHANNEL}" ]] && CHANNEL=green
+baseSubvol=ubos-${CHANNEL}
+developSubvol=ubos-develop-${CHANNEL}
+targetSubvol=ubos-target-${CHANNEL}
 
 ## Names of the files and subvolumes
 [[ -z "${BASE_IMAGE_NAME}" ]] && BASE_IMAGE_NAME="ubos_${CHANNEL}_x86_64-CONTAINER_latest.tar.xz"
@@ -54,81 +57,91 @@ df --output=fstype . | grep btrfs > /dev/null 2>&1 || die "Working directory is 
 imageFile=$1
 [[ -f "${imageFile}" ]] || die "Image file does not exist: ${imageFile}"
 
-baseSubvol=ubos-${CHANNEL}
-developSubvol=ubos-develop-${CHANNEL}
-targetSubvol=ubos-target-${CHANNEL}
+echo ${imageFile} | grep ${CHANNEL}  > /dev/null 2>&1 || die "Image name (${imageFile}) does not contain the channel name (${CHANNEL})"
 
+[[ -d "${baseSubvol}"    ]] && die "Directory exists: $baseSubvol"
+[[ -d "${developSubvol}" ]] && die "Directory exists: $developSubvol"
+[[ -d "${targetSubvol}"  ]] && die "Directory exists: $targetSubvol"
 
-## if needed, unpack base image and update it
-if [[ ! -d "${baseSubvol}" ]]; then
-    echo "Creating subvol ${baseSubvol}..."
-    sudo btrfs subvolume create "${baseSubvol}"
+echo "Setting up for channel ${CHANNEL}"
 
-    echo "Unpacking image..."
-    ( cd "${baseSubvol}"; sudo tar xfJ "../${imageFile}" )
+####
 
-    bootContainer "${baseSubvol}"
+echo "** Setting up base subvol ${baseSubvol}"
 
-    echo "Updating to latest version..."
-    sudo machinectl shell "${baseSubvol}" /usr/bin/ubos-admin update -v
+echo "Creating subvol..."
+sudo btrfs subvolume create "${baseSubvol}" >/dev/null
 
-    terminateContainer "${baseSubvol}"
+echo "Unpacking image..."
+( cd "${baseSubvol}"; sudo tar xfJ "../${imageFile}" )
 
+bootContainer "${baseSubvol}"
+
+echo "Updating to latest version..."
+sudo machinectl shell -q "${baseSubvol}" /usr/bin/ubos-admin update >/dev/null
+
+terminateContainer "${baseSubvol}"
+
+####
+
+echo "** Setting up develop subvol ${developSubvol}"
+
+echo "Creating subvol..."
+sudo btrfs subvolume snapshot "${baseSubvol}" "${developSubvol}" >/dev/null
+
+bootContainer "${developSubvol}"
+
+echo "Setting hostname to ${developSubvol}..."
+sudo machinectl shell -q "${developSubvol}" /usr/bin/hostnamectl set-hostname "${developSubvol}" >/dev/null
+
+echo "Permit unsigned package installs..."
+sudo perl -pi -e 's!LocalFileSigLevel.*!LocalFileSigLevel = Optional!' "${developSubvol}/etc/pacman.conf"
+
+echo "Installing development packages..."
+sudo machinectl shell -q "${developSubvol}" /usr/bin/pacman -S ubos-base-devel --noconfirm >/dev/null
+
+echo "Adding user ubosdev with ssh keys and necessary permissions..."
+sudo machinectl shell -q "${developSubvol}" /usr/bin/useradd -m ubosdev -d /ubosdev -u $(id -u) >/dev/null # Create outside /home, so we can --bind /home if desired
+sudo machinectl shell -q "ubosdev@${developSubvol}" /usr/bin/ssh-keygen -q -f /ubosdev/.ssh/id_rsa -P '' >/dev/null
+echo "ubosdev ALL = NOPASSWD: ALL" | sudo tee "${developSubvol}/etc/sudoers.d/ubosdev" >/dev/null
+
+if [[ -e "${HOME}/.ssh/id_rsa.pub" ]]; then
+    cp "${HOME}/.ssh/id_rsa.pub" "${developSubvol}/ubosdev/.ssh/authorized_keys"
 else
-    echo "Directory exists, skipping create / unpack: ${baseSubvol}"
+    echo "No ssh keypair found on host; not enabling authorized_hosts for ubosdev in ${developSubvol}"
 fi
 
-## if needed, create develop subvolume, set hostname, install develop packages, create ubosdev user
-if [[ ! -d "${developSubvol}" ]]; then
-    echo "Creating subvol ${developSubvol}..."
-    sudo btrfs subvolume snapshot "${baseSubvol}" "${developSubvol}"
+echo "Opening port 8888 for Java debugging..."
+echo "8888/tcp" | sudo tee "${developSubvol}/etc/ubos/open-ports.d/java-debugging" >/dev/null
+sudo machinectl shell -q "${developSubvol}" /usr/bin/ubos-admin setnetconfig container >/dev/null
 
-    bootContainer "${developSubvol}"
+terminateContainer "${developSubvol}"
 
-    echo "Settng hostname to ${developSubvol}..."
-    sudo machinectl shell "${developSubvol}" /usr/bin/hostnamectl set-hostname "${developSubvol}"
+####
 
-    echo "Installing development packages..."
-    sudo machinectl shell "${developSubvol}" /usr/bin/pacman -S ubos-base-devel --noconfirm
+echo "** Setting up target subvol ${targetSubvol}"
 
-    echo "Adding user ubosdev with ssh keys and necessary permissions..."
-    sudo machinectl shell "${developSubvol}" /usr/bin/useradd -m ubosdev -u $(id -u)
-    sudo machinectl shell "ubosdev@${developSubvol}" /usr/bin/ssh-keygen -q -f /home/ubosdev/.ssh/id_rsa -P ''
-    echo "ubosdev ALL = NOPASSWD: ALL" | sudo tee "${developSubvol}/etc/sudoers.d/ubosdev" > /dev/null
+echo "Creating subvol..."
+sudo btrfs subvolume snapshot "${baseSubvol}" "${targetSubvol}" >/dev/null
 
-    if [[ -e "${HOME}/.ssh/id_rsa.pub" ]]; then
-        cp "${HOME}/.ssh/id_rsa.pub" "${developSubvol}/home/ubosdev/.ssh/authorized_keys"
-    else
-        echo "No ssh keypair found on host; not enabling authorized_hosts for ubodev in ${developSubvol}"
-    fi
+bootContainer "${targetSubvol}"
 
-    terminateContainer "${developSubvol}"
+echo "Setting hostname to ${targetSubvol}..."
+sudo machinectl shell -q "${targetSubvol}" /usr/bin/hostnamectl set-hostname "${targetSubvol}" >/dev/null
 
-else
-    echo "Directory exists, skipping create: ${developSubvol}"
-fi
+echo "Permit unsigned package installs"
+sudo perl -pi -e 's!LocalFileSigLevel.*!LocalFileSigLevel = Optional!' "${targetSubvol}/etc/pacman.conf"
 
-## if needed, create target subvolume, allow shepherd login from ubosdev and unsigned package installs
-if [[ ! -d "${targetSubvol}" ]]; then
-    echo "Creating subvol ${targetSubvol}..."
-    sudo btrfs subvolume snapshot "${baseSubvol}" "${targetSubvol}"
+echo "Permit ssh login from ubosdev"
+cat "${developSubvol}/ubosdev/.ssh/id_rsa.pub" | sudo systemd-run -q -P -M "${targetSubvol}" /usr/bin/ubos-admin setup-shepherd -v >/dev/null
 
-    bootContainer "${targetSubvol}"
+echo "Opening port 8888 for Java debugging..."
+echo "8888/tcp" | sudo tee "${targetSubvol}/etc/ubos/open-ports.d/java-debugging" >/dev/null
+sudo machinectl shell -q "${targetSubvol}" /usr/bin/ubos-admin setnetconfig container >/dev/null
 
-    echo "Settng hostname to ${targetSubvol}..."
-    sudo machinectl shell "${targetSubvol}" /usr/bin/hostnamectl set-hostname "${targetSubvol}" 
+terminateContainer "${targetSubvol}"
 
-    echo "Permit unsigned package installs and login from"
-    sudo perl -pi -e 's!LocalFileSigLevel.*!LocalFileSigLevel = Optional!' "${targetSubvol}/etc/pacman.conf"
-
-    echo "Permit ssh login from ubosdev"
-    cat "${developSubvol}/home/ubosdev/.ssh/id_rsa.pub" | sudo systemd-run -P -M "${targetSubvol}" /usr/bin/ubos-admin setup-shepherd -v
-
-    terminateContainer "${targetSubvol}"
-
-else
-    echo "Directory exists, skipping create: ${targetSubvol}"
-fi
+####
 
 echo "DONE."
 
