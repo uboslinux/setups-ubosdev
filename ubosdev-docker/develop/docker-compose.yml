@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  ubos-develop:
+    container_name: ubos-develop-${CHANNEL:-yellow}
+    image: ubos/ubos-develop-${CHANNEL:-yellow}:latest
+    working_dir: /home/ubosdev
+    privileged: true
+    volumes:
+      - ./projects:/home/ubosdev/projects
