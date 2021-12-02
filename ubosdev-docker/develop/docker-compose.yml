@@ -6,5 +6,8 @@ services:
     image: ubos/ubos-develop-${CHANNEL:-yellow}:latest
     working_dir: /home/ubosdev
     privileged: true
+    ports:
+      - 1080:80
+      - 1443:443
     volumes:
       - ./projects:/home/ubosdev/projects
